@@ -104,10 +104,10 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text("Silakan kirim foto produk bersama kata kunci /genvideo atau 'genVideo'.")
         return
 
-    status_msg = await message.reply_text("⏳ **[1/2]** Mengunduh & Menganalisis foto produk...")
+    status_msg = await message.reply_text("⏳ **[1/2]** Menganalisis foto produk & instruksi kamu...")
 
     try:
-        # 1. Download foto produk dari Telegram
+        # Download foto produk dari Telegram
         photo_file = await message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
 
@@ -122,11 +122,12 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         analysis_prompt = f"""
         Kamu adalah seorang Video Director & Expert Affiliate Marketer.
         
-        Instruksi Tambahan Pengguna: "{user_caption}"
+        Instruksi/Arah Tambahan Pengguna dari Caption:
+        "{user_caption}"
         
         Tugasmu:
-        1. Analisis foto produk ini.
-        2. Buat 1 Hook Copywriting yang sangat memikat untuk caption TikTok/Reels (3-5 detik pertama, bahasa Indonesia).
+        1. Analisis foto produk ini beserta instruksi tambahan pengguna.
+        2. Buat 1 Hook Copywriting yang sangat memikat untuk caption TikTok/Reels (3-5 detik pertama, bahasa Indonesia). Sesuaikan dengan arahan instruksi pengguna jika ada.
         3. Buat 1 Detailed Video Generation Prompt (dalam bahasa Inggris, durasi 3-5 detik) yang fokus pada visual gerak kamera, lighting, dan showcase produk untuk dimasukkan ke AI Video Generator (seperti Google Veo / Imagen).
 
         Format Respon (Wajib persis seperti ini):
@@ -137,13 +138,11 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         [Isi prompt bahasa Inggris]
         """
 
-        # 2. Buat Part Gambar yang valid untuk google-genai SDK
         image_part = types.Part.from_bytes(
             data=bytes(photo_bytes),
             mime_type='image/jpeg'
         )
 
-        # 3. Kirim ke Gemini 2.5 Flash
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[image_part, analysis_prompt]
@@ -175,30 +174,18 @@ def main():
         logger.error("Token Telegram dan GEMINI_API_KEY harus diatur di Environment Variables!")
         return
 
-    # 1. Jalankan Dummy Web Server di thread latar belakang untuk Back4App Health Check
     threading.Thread(target=run_dummy_server, daemon=True).start()
 
-    # 2. Inisialisasi Bot Telegram
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # 3. Registrasi Handlers
     app.add_handler(CommandHandler("start", start_command))
-    
-    # Handler Command /genvideo (jika panggil via command saja)
     app.add_handler(CommandHandler("genvideo", generate_video_workflow))
     
-    # Handler foto dengan caption berisi 'genvideo' / '/genvideo'
+    # PERBAIKAN FILTER CAPTION FOTO:
+    # Menggunakan regex search wildcard `.*genvideo.*` agar mendeteksi kata genvideo di mana saja dalam caption
     app.add_handler(
         MessageHandler(
-            filters.PHOTO & (filters.CAPTION & filters.Regex(r'(?i)genvideo')),
-            generate_video_workflow
-        )
-    )
-    
-    # Handler foto tanpa caption genvideo (opsional: diproses sebagai analisis gambar biasa)
-    app.add_handler(
-        MessageHandler(
-            filters.PHOTO & ~filters.CAPTION,
+            filters.PHOTO & filters.CaptionRegex(r'(?i).*genvideo.*'),
             generate_video_workflow
         )
     )
