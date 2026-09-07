@@ -5,8 +5,6 @@ import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from google import genai
-from google.genai import types
 import dashscope
 
 # Setup Logging
@@ -36,15 +34,13 @@ def run_dummy_server():
 # ---------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 ALLOWED_USERS = os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
-
-client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 if DASHSCOPE_API_KEY:
     dashscope.api_key = DASHSCOPE_API_KEY
 
 def is_authorized(user_id: int) -> bool:
+    """Mengecek apakah user berhak mengakses bot"""
     if not ALLOWED_USERS or ALLOWED_USERS == ['']:
         return True
     return str(user_id) in [u.strip() for u in ALLOWED_USERS]
@@ -59,49 +55,53 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     welcome_text = (
-        "Halo! Saya **Van Hermes AI Agent**.\n\n"
+        "Halo! Saya **Van Hermes AI Agent** (Powered by Qwen/Alibaba Cloud).\n\n"
         "Fitur yang tersedia:\n"
-        "1. **Chat Biasa:** Kirim pesan teks langsung untuk bertanya ke Gemini.\n"
-        "2. **Affiliate Video Workflow (Qwen WanX):** Kirim foto produk lalu sertakan caption `/genvideo` atau `genVideo`."
+        "1. **Chat Biasa:** Kirim pesan teks langsung untuk bertanya ke Qwen LLM.\n"
+        "2. **Affiliate Video Workflow:** Kirim foto produk lalu sertakan caption `/genvideo` atau `genVideo`."
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Merespon chat teks biasa menggunakan Qwen LLM"""
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         await update.message.reply_text("Akses ditolak.")
         return
 
-    if not client:
-        await update.message.reply_text("GEMINI_API_KEY belum dikonfigurasi di Back4App.")
+    if not DASHSCOPE_API_KEY:
+        await update.message.reply_text("DASHSCOPE_API_KEY belum dikonfigurasi di Back4App.")
         return
 
     user_text = update.message.text
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=user_text,
+        response = dashscope.Generation.call(
+            model='qwen-max',
+            messages=[
+                {'role': 'system', 'content': 'Kamu adalah asisten AI Van Hermes yang cerdas dan ramah.'},
+                {'role': 'user', 'content': user_text}
+            ]
         )
-        reply_text = response.text if response.text else "Maaf, tidak ada respons yang dihasilkan."
-        await update.message.reply_text(reply_text)
+        if response.status_code == 200:
+            reply_text = response.output.text
+            await update.message.reply_text(reply_text)
+        else:
+            await update.message.reply_text(f"Error Qwen: {response.message}")
 
     except Exception as e:
         logger.error(f"Error saat memproses pesan teks: {e}")
-        await update.message.reply_text(f"Terjadi kesalahan: {str(e)}")
+        await update.message.reply_text(f"Terjadi kesalahan saat memproses permintaan Anda: {str(e)}")
 
 async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Workflow analisis foto via Qwen VL -> Render Video via Qwen WanX -> Kirim .mp4"""
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         await update.message.reply_text("Akses ditolak.")
         return
 
     message = update.message
-
-    if not client:
-        await message.reply_text("⚠️ API Key Google AI Studio (`GEMINI_API_KEY`) belum dipasang di Back4App.")
-        return
 
     if not DASHSCOPE_API_KEY:
         await message.reply_text("⚠️ API Key Qwen/DashScope (`DASHSCOPE_API_KEY`) belum dipasang di Back4App.")
@@ -111,12 +111,13 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text("Silakan kirim foto produk bersama kata kunci /genvideo.")
         return
 
-    status_msg = await message.reply_text("⏳ **[1/3]** Menganalisis foto produk via Gemini...")
+    status_msg = await message.reply_text("⏳ **[1/3]** Mengunduh & Menganalisis foto produk via Qwen-VL...")
 
     try:
+        # 1. Download foto produk dari Telegram
         photo_file = await message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
-        
+
         temp_img_path = "/tmp/product_input.jpg"
         with open(temp_img_path, "wb") as f:
             f.write(photo_bytes)
@@ -126,33 +127,42 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         analysis_prompt = f"""
         Kamu adalah seorang Video Director & Expert Affiliate Marketer.
         
-        Instruksi Tambahan Pengguna: "{user_caption}"
+        Instruksi/Arah Tambahan Pengguna dari Caption:
+        "{user_caption}"
         
         Tugasmu:
-        1. Analisis foto produk ini.
+        1. Analisis foto produk ini beserta instruksi tambahan pengguna.
         2. Buat 1 Hook Copywriting yang sangat memikat untuk caption TikTok/Reels (3-5 detik pertama, bahasa Indonesia).
         3. Buat 1 Detailed Video Generation Prompt (dalam bahasa Inggris, maksimal 50 kata) yang fokus pada visual gerak kamera, lighting, dan showcase produk.
 
         Format Respon (Wajib persis seperti ini):
         📌 **HOOK COPYWRITING:**
-        [Isi hook]
+        [Isi hook bahasa Indonesia]
 
         🎬 **PROMPT VIDEO GENERATOR:**
         [Isi prompt bahasa Inggris saja]
         """
 
-        image_part = types.Part.from_bytes(
-            data=bytes(photo_bytes),
-            mime_type='image/jpeg'
+        # Panggil Qwen-VL untuk membaca gambar produk
+        vl_response = dashscope.MultiModalConversation.call(
+            model='qwen-vl-plus',
+            messages=[
+                {
+                    'role': 'user',
+                    'content': [
+                        {'image': f'file://{temp_img_path}'},
+                        {'text': analysis_prompt}
+                    ]
+                }
+            ]
         )
 
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[image_part, analysis_prompt]
-        )
+        if vl_response.status_code != 200:
+            raise Exception(f"Gagal memproses gambar via Qwen-VL: {vl_response.message}")
 
-        result_text = response.text if response.text else ""
-        
+        result_text = vl_response.output.choices[0].message.content[0]['text']
+
+        # Ekstrak prompt video untuk WanX
         video_prompt = "A high quality product showcase video, smooth camera zoom in"
         if "🎬 **PROMPT VIDEO GENERATOR:**" in result_text:
             video_prompt = result_text.split("🎬 **PROMPT VIDEO GENERATOR:**")[-1].strip()
@@ -160,10 +170,10 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         await context.bot.edit_message_text(
             chat_id=message.chat_id,
             message_id=status_msg.message_id,
-            text="🎬 **[2/3]** Mengirim ke Qwen WanX untuk me-render video..."
+            text="🎬 **[2/3]** Mengirim prompt & foto ke Qwen WanX untuk me-render video..."
         )
 
-        # Pemanggilan API WanX menggunakan objek dasar dashscope
+        # 2. Panggil API WanX Image-to-Video
         rsp = dashscope.Image2Video.async_call(
             model='wanx-v1',
             image_url=f"file://{temp_img_path}",
@@ -171,7 +181,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         )
 
         if rsp.status_code != 200:
-            raise Exception(f"Gagal memanggil Qwen API: {rsp.message}")
+            raise Exception(f"Gagal memanggil Qwen WanX API: {rsp.message}")
 
         await context.bot.edit_message_text(
             chat_id=message.chat_id,
@@ -179,8 +189,9 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
             text="⏳ **[3/3]** Me-render video di Qwen Cloud (butuh waktu ~1-2 menit)..."
         )
 
+        # 3. Polling sampai video selesai
         video_url = None
-        for _ in range(36):  # Tunggu maksimal 6 menit
+        for _ in range(36):  # Cek berkala max 6 menit
             time.sleep(10)
             task_status = dashscope.Image2Video.wait(rsp)
             if task_status.output.task_status == 'SUCCEEDED':
@@ -189,11 +200,13 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
             elif task_status.output.task_status in ['FAILED', 'CANCELED']:
                 raise Exception(f"Render video gagal di Qwen Studio: {task_status.output.message}")
 
+        # 4. Kirimkan video hasil render ke Telegram
         if video_url:
+            caption_reply = f"🎥 **Video Promosi Ready (via Qwen AI)!**\n\n{result_text}"
             await context.bot.send_video(
                 chat_id=message.chat_id,
                 video=video_url,
-                caption=f"🎥 **Video Promosi Selesai!**\n\n{result_text}",
+                caption=caption_reply,
                 parse_mode="Markdown"
             )
             await context.bot.delete_message(chat_id=message.chat_id, message_id=status_msg.message_id)
@@ -217,8 +230,8 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
 # 4. UTAMA
 # ---------------------------------------------------------
 def main():
-    if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
-        logger.error("Token Telegram dan GEMINI_API_KEY harus diatur di Environment Variables!")
+    if not TELEGRAM_BOT_TOKEN or not DASHSCOPE_API_KEY:
+        logger.error("Token Telegram dan DASHSCOPE_API_KEY harus diatur di Environment Variables!")
         return
 
     threading.Thread(target=run_dummy_server, daemon=True).start()
@@ -237,7 +250,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot Van Hermes berhasil berjalan...")
+    logger.info("Bot Van Hermes (Full Qwen) berhasil berjalan...")
     app.run_polling()
 
 if __name__ == "__main__":
