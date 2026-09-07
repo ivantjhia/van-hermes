@@ -1,7 +1,6 @@
 import os
 import logging
 import threading
-import base64
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
@@ -36,7 +35,6 @@ def run_dummy_server():
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 ALLOWED_USERS = os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",")
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
-IMGBB_API_KEY = os.getenv("IMGBB_API_KEY")
 
 QWEN_BASE_URL = "https://ws-3pp3842ksq2nry2w.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 
@@ -50,22 +48,20 @@ def is_authorized(user_id: int) -> bool:
         return True
     return str(user_id) in [u.strip() for u in ALLOWED_USERS]
 
-def upload_image_to_imgbb(photo_bytes: bytes) -> str:
-    """Mengunggah foto ke ImgBB untuk mendapatkan Direct Public HTTPS URL"""
-    if not IMGBB_API_KEY:
-        raise Exception("IMGBB_API_KEY belum dikonfigurasi di Environment Variables Back4App.")
-    
-    url = "https://api.imgbb.com/1/upload"
-    payload = {
-        "key": IMGBB_API_KEY,
-        "image": base64.b64encode(photo_bytes).decode('utf-8')
+def upload_image_to_catbox(photo_bytes: bytes) -> str:
+    """Mengunggah foto ke Catbox.moe (Tanpa perlu API Key) untuk dapat Public HTTPS URL"""
+    url = "https://catbox.moe/user/api.php"
+    files = {
+        'fileToUpload': ('image.jpg', photo_bytes, 'image/jpeg')
     }
-    res = requests.post(url, data=payload)
-    json_data = res.json()
-    if res.status_code == 200 and json_data.get("success"):
-        return json_data["data"]["url"]
+    data = {
+        'reqtype': 'fileupload'
+    }
+    res = requests.post(url, data=data, files=files, timeout=30)
+    if res.status_code == 200 and res.text.startswith("https://"):
+        return res.text.strip()
     else:
-        raise Exception(f"Gagal mengunggah foto ke host publik: {json_data.get('error', {}).get('message', res.text)}")
+        raise Exception(f"Gagal mengunggah foto ke Catbox: {res.text}")
 
 # ---------------------------------------------------------
 # 3. HANDLERS TELEGRAM
@@ -113,7 +109,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Terjadi kesalahan saat memproses permintaan Anda: {str(e)}")
 
 async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Workflow analisis foto via Qwen-VL -> Upload Public URL -> Render Wan2.6 -> Kirim .mp4"""
+    """Workflow analisis foto via Qwen-VL -> Upload Catbox -> Render Wan2.6 -> Kirim .mp4"""
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         await update.message.reply_text("Akses ditolak.")
@@ -129,13 +125,13 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text("Silakan kirim foto produk bersama kata kunci /genvideo.")
         return
 
-    status_msg = await message.reply_text("⏳ **[1/3]** Mengunduh & Mengunggah foto ke Host Publik...")
+    status_msg = await message.reply_text("⏳ **[1/3]** Mengunduh & Mengunggah foto ke Public Host...")
 
     try:
-        # 1. Download foto dari Telegram & Upload ke Host Publik
+        # 1. Download foto dari Telegram & Upload ke Catbox (Public URL)
         photo_file = await message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
-        public_image_url = upload_image_to_imgbb(photo_bytes)
+        public_image_url = upload_image_to_catbox(photo_bytes)
 
         await context.bot.edit_message_text(
             chat_id=message.chat_id,
@@ -195,7 +191,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
             text="🎬 **[3/3]** Me-render video `.mp4` via Wan2.6-I2V-flash..."
         )
 
-        # 3. Trigger Render Video Synchronous dengan Public Image URL
+        # 3. Trigger Render Video Synchronous dengan Public Image URL dari Catbox
         task_url = "https://ws-3pp3842ksq2nry2w.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/image2video/video-synthesis"
         headers = {
             "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
@@ -264,7 +260,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot Van Hermes (Wan2.6 Public Host Fix) berhasil berjalan...")
+    logger.info("Bot Van Hermes (Wan2.6 Catbox Host Fix) berhasil berjalan...")
     app.run_polling()
 
 if __name__ == "__main__":
