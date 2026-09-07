@@ -23,5 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Menyalin seluruh kode agen ke dalam container
 COPY . .
 
+HEALTHCHECK NONE
+
 # Jalankan skrip utama Hermes Agent saat container dinyalakan
 CMD ["python", "main.py"]
