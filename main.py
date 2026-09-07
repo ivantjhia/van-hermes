@@ -1,5 +1,7 @@
 import os
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google import genai
@@ -10,29 +12,38 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Ambil Environment Variables dari Koyeb
+# Dummy Web Server untuk mengelabui Health Check Back4App
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK - Bot is running")
+
+def run_dummy_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    logger.info(f"Dummy HTTP Server berjalan di port {port}")
+    server.serve_forever()
+
+# --- Konfigurasi Bot Telegram ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USERS = os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Inisialisasi Google GenAI Client
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Fungsi Validasi Pengguna Telegram
 def is_authorized(user_id: int) -> bool:
     if not ALLOWED_USERS or ALLOWED_USERS == ['']:
         return True
     return str(user_id) in [u.strip() for u in ALLOWED_USERS]
 
-# Handler Perintah /start
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         await update.message.reply_text("Maaf, Anda tidak memiliki akses ke agen ini.")
         return
-    await update.message.reply_text("Halo! Hermes Agent siap membantu Anda. Silakan kirim pesan atau instruksi.")
+    await update.message.reply_text("Halo! Bot Gemini siap membantu Anda.")
 
-# Handler Pesan Teks (Proses AI)
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
@@ -40,17 +51,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_text = update.message.text
-    
-    # Kirim indikator "typing..." di Telegram
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     try:
-        # Panggil Model Gemini Flash
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=user_text,
         )
-        
         reply_text = response.text if response.text else "Maaf, tidak ada respons yang dihasilkan."
         await update.message.reply_text(reply_text)
 
@@ -60,18 +67,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
-        logger.error("TELEGRAM_BOT_TOKEN dan GEMINI_API_KEY harus diatur di Environment Variables!")
+        logger.error("TELEGRAM_BOT_TOKEN dan GEMINI_API_KEY harus diatur!")
         return
 
-    # Inisialisasi Bot Telegram
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # Jalankan Dummy HTTP Server di background thread agar Back4App Health Check berhasil
+    threading.Thread(target=run_dummy_server, daemon=True).start()
 
-    # Register Handler
+    # Jalankan Bot Telegram
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Jalankan Bot (Long Polling)
-    logger.info("Hermes Agent sedang berjalan di Koyeb...")
+    logger.info("Bot sedang berjalan...")
     app.run_polling()
 
 if __name__ == "__main__":
