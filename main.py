@@ -84,7 +84,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = client.chat.completions.create(
-            model="qwen-max",
+            model="qwen-flash",
             messages=[
                 {"role": "system", "content": "Kamu adalah asisten AI Van Hermes yang cerdas, helpful, dan ramah."},
                 {"role": "user", "content": user_text}
