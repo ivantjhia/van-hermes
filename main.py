@@ -1,7 +1,6 @@
 import os
 import logging
 import threading
-import time
 import base64
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -38,7 +37,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKE
 ALLOWED_USERS = os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",")
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 
-# Endpoint resmi MaaS Regional Alibaba Cloud
 QWEN_BASE_URL = "https://ws-3pp3842ksq2nry2w.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 
 client = OpenAI(
@@ -47,7 +45,6 @@ client = OpenAI(
 ) if DASHSCOPE_API_KEY else None
 
 def is_authorized(user_id: int) -> bool:
-    """Mengecek apakah user berhak mengakses bot"""
     if not ALLOWED_USERS or ALLOWED_USERS == ['']:
         return True
     return str(user_id) in [u.strip() for u in ALLOWED_USERS]
@@ -70,7 +67,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Merespon chat teks biasa menggunakan Qwen Flash"""
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         await update.message.reply_text("Akses ditolak.")
@@ -99,7 +95,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Terjadi kesalahan saat memproses permintaan Anda: {str(e)}")
 
 async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Workflow analisis foto via Qwen-VL -> Render Video via Wan2.6-I2V-flash -> Kirim .mp4"""
+    """Workflow analisis foto via Qwen-VL -> Render Synchronous Wan2.6-I2V-flash -> Kirim .mp4"""
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         await update.message.reply_text("Akses ditolak.")
@@ -115,7 +111,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text("Silakan kirim foto produk bersama kata kunci /genvideo.")
         return
 
-    status_msg = await message.reply_text("⏳ **[1/3]** Menganalisis foto produk via Qwen-VL...")
+    status_msg = await message.reply_text("⏳ **[1/2]** Menganalisis foto produk via Qwen-VL...")
 
     try:
         # 1. Download foto produk dari Telegram & Konversi Base64
@@ -165,7 +161,6 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
 
         result_text = response.choices[0].message.content
 
-        # Ekstrak prompt video bahasa Inggris saja
         video_prompt = "A high quality cinematic product showcase video, smooth camera zoom in"
         if "🎬 **PROMPT VIDEO GENERATOR (EN):**" in result_text:
             video_prompt = result_text.split("🎬 **PROMPT VIDEO GENERATOR (EN):**")[-1].strip()
@@ -173,15 +168,14 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         await context.bot.edit_message_text(
             chat_id=message.chat_id,
             message_id=status_msg.message_id,
-            text="🎬 **[2/3]** Mengirim tugas render ke model Wan2.6-I2V-flash..."
+            text="🎬 **[2/2]** Me-render video `.mp4` via Wan2.6-I2V-flash (Synchronous Direct Call)..."
         )
 
-        # 3. Trigger Render Video via Model Wan2.6-I2V-flash
+        # 3. Trigger Render Video Synchronous (Tanpa Header Async)
         task_url = "https://ws-3pp3842ksq2nry2w.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/image2video/video-synthesis"
         headers = {
             "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
-            "Content-Type": "application/json",
-            "X-DashScope-Async": "enable"
+            "Content-Type": "application/json"
         }
         
         payload = {
@@ -192,42 +186,22 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
             }
         }
 
-        task_res = requests.post(task_url, headers=headers, json=payload)
+        # Direct HTTP POST call
+        task_res = requests.post(task_url, headers=headers, json=payload, timeout=120)
         task_json = task_res.json()
 
-        if task_res.status_code != 200 or "output" not in task_json:
-            # Fallback jika penulisan nama model di API menggunakan huruf kecil
-            payload["model"] = "wan2.6-i2v-flash"
-            task_res = requests.post(task_url, headers=headers, json=payload)
-            task_json = task_res.json()
-
-        if task_res.status_code != 200 or "output" not in task_json:
-            raise Exception(f"Gagal memicu render Wan2.6-I2V-flash: {task_json.get('message', task_res.text)}")
-
-        task_id = task_json["output"]["task_id"]
-
-        await context.bot.edit_message_text(
-            chat_id=message.chat_id,
-            message_id=status_msg.message_id,
-            text="⏳ **[3/3]** Me-render video `.mp4` via Wan2.6 Flash Cloud..."
-        )
-
-        # 4. Polling Status Task sampai Video Selesai
-        poll_url = f"https://ws-3pp3842ksq2nry2w.ap-southeast-1.maas.aliyuncs.com/api/v1/tasks/{task_id}"
         video_url = None
+        if task_res.status_code == 200 and "output" in task_json:
+            video_url = task_json["output"].get("video_url")
+        else:
+            # Fallback jika model di API memerlukan penulisan huruf kecil
+            payload["model"] = "wan2.6-i2v-flash"
+            task_res = requests.post(task_url, headers=headers, json=payload, timeout=120)
+            task_json = task_res.json()
+            if task_res.status_code == 200 and "output" in task_json:
+                video_url = task_json["output"].get("video_url")
 
-        for _ in range(36):  # Cek berkala selama max 6 menit
-            time.sleep(10)
-            poll_res = requests.get(poll_url, headers={"Authorization": f"Bearer {DASHSCOPE_API_KEY}"}).json()
-            task_status = poll_res.get("output", {}).get("task_status")
-
-            if task_status == "SUCCEEDED":
-                video_url = poll_res["output"]["video_url"]
-                break
-            elif task_status in ["FAILED", "CANCELED"]:
-                raise Exception(f"Render video gagal di Qwen: {poll_res.get('output', {}).get('message', 'Unknown Error')}")
-
-        # 5. Kirimkan File Video .mp4 Hasil Render ke Telegram
+        # 4. Kirimkan File Video .mp4 Hasil Render ke Telegram
         if video_url:
             caption_reply = f"🎥 **Video Promosi Ready (Wan2.6-I2V-flash)!**\n\n{result_text}"
             await context.bot.send_video(
@@ -238,11 +212,8 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
             )
             await context.bot.delete_message(chat_id=message.chat_id, message_id=status_msg.message_id)
         else:
-            await context.bot.edit_message_text(
-                chat_id=message.chat_id,
-                message_id=status_msg.message_id,
-                text="⚠️ Waktu render video habis (timeout)."
-            )
+            error_msg = task_json.get("message", task_res.text)
+            raise Exception(f"Gagal memicu render Wan2.6-I2V-flash: {error_msg}")
 
     except Exception as e:
         logger.error(f"Error pada workflow genvideo: {e}")
@@ -277,7 +248,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot Van Hermes (Wan2.6 Flash Video) berhasil berjalan...")
+    logger.info("Bot Van Hermes (Wan2.6 Synchronous) berhasil berjalan...")
     app.run_polling()
 
 if __name__ == "__main__":
