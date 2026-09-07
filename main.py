@@ -32,7 +32,8 @@ def run_dummy_server():
 # ---------------------------------------------------------
 # 2. SETUP GEMINI CLIENT & KEAMANAN
 # ---------------------------------------------------------
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Fallback nama variabel lingkungan token
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 ALLOWED_USERS = os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -117,8 +118,12 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
             text="💡 **[2/2]** Merancang Hook Copywriting & Prompt Video (3-5 detik)..."
         )
 
-        analysis_prompt = """
+        user_caption = message.caption or ""
+
+        analysis_prompt = f"""
         Kamu adalah seorang Video Director & Expert Affiliate Marketer.
+        
+        Instruksi Tambahan Pengguna: "{user_caption}"
         
         Tugasmu:
         1. Analisis foto produk ini.
@@ -167,7 +172,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
 # ---------------------------------------------------------
 def main():
     if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
-        logger.error("TELEGRAM_BOT_TOKEN dan GEMINI_API_KEY harus diatur di Environment Variables!")
+        logger.error("Token Telegram dan GEMINI_API_KEY harus diatur di Environment Variables!")
         return
 
     # 1. Jalankan Dummy Web Server di thread latar belakang untuk Back4App Health Check
@@ -179,13 +184,13 @@ def main():
     # 3. Registrasi Handlers
     app.add_handler(CommandHandler("start", start_command))
     
-    # Handler Command /genvideo
+    # Handler Command /genvideo (jika user panggil via command saja)
     app.add_handler(CommandHandler("genvideo", generate_video_workflow))
     
-    # Handler foto dengan caption mengandung 'genvideo' (case-insensitive)
+    # PERBAIKAN UTAMA: Menggabungkan filters.PHOTO dengan filters.CAPTION
     app.add_handler(
         MessageHandler(
-            filters.PHOTO & filters.Regex(r'(?i)genvideo'),
+            filters.PHOTO & (filters.CAPTION & filters.Regex(r'(?i)genvideo')),
             generate_video_workflow
         )
     )
