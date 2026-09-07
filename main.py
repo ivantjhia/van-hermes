@@ -32,7 +32,6 @@ def run_dummy_server():
 # ---------------------------------------------------------
 # 2. SETUP GEMINI CLIENT & KEAMANAN
 # ---------------------------------------------------------
-# Fallback nama variabel lingkungan token
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 ALLOWED_USERS = os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -70,7 +69,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not client:
-        await update.message.reply_text("GEMINI_API_KEY belum dikonfigurasi.")
+        await update.message.reply_text("GEMINI_API_KEY belum dikonfigurasi di Back4App.")
         return
 
     user_text = update.message.text
@@ -85,8 +84,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply_text)
 
     except Exception as e:
-        logger.error(f"Error saat memproses pesan: {e}")
-        await update.message.reply_text("Terjadi kesalahan saat memproses permintaan Anda.")
+        logger.error(f"Error saat memproses pesan teks: {e}")
+        await update.message.reply_text(f"Terjadi kesalahan saat memproses permintaan Anda: {str(e)}")
 
 async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Workflow analisis foto produk -> Hook Copywriting & Prompt Video 3-5 detik"""
@@ -105,10 +104,10 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text("Silakan kirim foto produk bersama kata kunci /genvideo atau 'genVideo'.")
         return
 
-    status_msg = await message.reply_text("⏳ **[1/2]** Menganalisis foto produk...")
+    status_msg = await message.reply_text("⏳ **[1/2]** Mengunduh & Menganalisis foto produk...")
 
     try:
-        # Download foto produk dari Telegram
+        # 1. Download foto produk dari Telegram
         photo_file = await message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
 
@@ -138,19 +137,19 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         [Isi prompt bahasa Inggris]
         """
 
-        # Kirim Gambar + Prompt ke Gemini API
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[
-                types.Part.from_bytes(
-                    data=bytes(photo_bytes),
-                    mime_type='image/jpeg',
-                ),
-                analysis_prompt
-            ]
+        # 2. Buat Part Gambar yang valid untuk google-genai SDK
+        image_part = types.Part.from_bytes(
+            data=bytes(photo_bytes),
+            mime_type='image/jpeg'
         )
 
-        result_text = response.text
+        # 3. Kirim ke Gemini 2.5 Flash
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[image_part, analysis_prompt]
+        )
+
+        result_text = response.text if response.text else "Gagal menghasilkan respon dari foto."
 
         await context.bot.edit_message_text(
             chat_id=message.chat_id,
@@ -164,7 +163,8 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         await context.bot.edit_message_text(
             chat_id=message.chat_id,
             message_id=status_msg.message_id,
-            text=f"❌ Terjadi kesalahan saat memproses gambar: {str(e)}"
+            text=f"❌ Terjadi kesalahan saat memproses gambar:\n`{str(e)}`",
+            parse_mode="Markdown"
         )
 
 # ---------------------------------------------------------
@@ -184,10 +184,10 @@ def main():
     # 3. Registrasi Handlers
     app.add_handler(CommandHandler("start", start_command))
     
-    # Handler Command /genvideo (jika user panggil via command saja)
+    # Handler Command /genvideo (jika panggil via command saja)
     app.add_handler(CommandHandler("genvideo", generate_video_workflow))
     
-    # PERBAIKAN UTAMA: Menggabungkan filters.PHOTO dengan filters.CAPTION
+    # Handler foto dengan caption berisi 'genvideo' / '/genvideo'
     app.add_handler(
         MessageHandler(
             filters.PHOTO & (filters.CAPTION & filters.Regex(r'(?i)genvideo')),
@@ -195,7 +195,15 @@ def main():
         )
     )
     
-    # Handler pesan teks biasa (tanya-jawab biasa)
+    # Handler foto tanpa caption genvideo (opsional: diproses sebagai analisis gambar biasa)
+    app.add_handler(
+        MessageHandler(
+            filters.PHOTO & ~filters.CAPTION,
+            generate_video_workflow
+        )
+    )
+
+    # Handler pesan teks biasa
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot Van Hermes berhasil berjalan...")
