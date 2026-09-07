@@ -1,78 +1,120 @@
 import os
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import logging
 import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google import genai
 from google.genai import types
-from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
+
+# Setup Logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
-# 1. DUMMY HTTP SERVER FOR BACK4APP HEALTH CHECK
+# 1. DUMMY HTTP SERVER UNTUK HEALTH CHECK BACK4APP
 # ---------------------------------------------------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(b"OK - Van Hermes is running!")
+        self.wfile.write(b"OK - Van Hermes Bot is running")
 
-def run_health_check_server():
-    port = int(os.environ.get("PORT", 8080))
-    server_address = ("", port)
-    httpd = HTTPServer(server_address, HealthCheckHandler)
-    print(f"Health check server running on port {port}")
-    httpd.serve_forever()
-
-# ---------------------------------------------------------
-# 2. SETUP GOOGLE AI STUDIO (GEMINI CLIENT)
-# ---------------------------------------------------------
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-client = None
-if GEMINI_API_KEY:
-    client = genai.Client(api_key=GEMINI_API_KEY)
+def run_dummy_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    logger.info(f"Dummy HTTP Server berjalan di port {port}")
+    server.serve_forever()
 
 # ---------------------------------------------------------
-# 3. TELEGRAM BOT HANDLERS
+# 2. SETUP GEMINI CLIENT & KEAMANAN
+# ---------------------------------------------------------
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ALLOWED_USERS = os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+def is_authorized(user_id: int) -> bool:
+    """Mengecek apakah user berhak mengakses bot"""
+    if not ALLOWED_USERS or ALLOWED_USERS == ['']:
+        return True
+    return str(user_id) in [u.strip() for u in ALLOWED_USERS]
+
+# ---------------------------------------------------------
+# 3. HANDLERS TELEGRAM
 # ---------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pesan sambutan saat /start"""
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text("Maaf, Anda tidak memiliki akses ke agen ini.")
+        return
+        
     welcome_text = (
         "Halo! Saya **Van Hermes AI Agent**.\n\n"
-        "Untuk membuat konsep video promosi affiliate:\n"
-        "1. Kirim foto produk.\n"
-        "2. Tambahkan caption `/genvideo` atau `genVideo` saat mengirim foto."
+        "Fitur yang tersedia:\n"
+        "1. **Chat Biasa:** Kirim pesan teks langsung untuk bertanya ke Gemini.\n"
+        "2. **Affiliate Video Workflow:** Kirim foto produk lalu sertakan caption `/genvideo` atau `genVideo`."
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Merespon chat teks biasa dari pengguna"""
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text("Akses ditolak.")
+        return
+
+    if not client:
+        await update.message.reply_text("GEMINI_API_KEY belum dikonfigurasi.")
+        return
+
+    user_text = update.message.text
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=user_text,
+        )
+        reply_text = response.text if response.text else "Maaf, tidak ada respons yang dihasilkan."
+        await update.message.reply_text(reply_text)
+
+    except Exception as e:
+        logger.error(f"Error saat memproses pesan: {e}")
+        await update.message.reply_text("Terjadi kesalahan saat memproses permintaan Anda.")
+
 async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Workflow pembuatan prompt video + hook copywriting"""
+    """Workflow analisis foto produk -> Hook Copywriting & Prompt Video 3-5 detik"""
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text("Akses ditolak.")
+        return
+
     message = update.message
 
     if not client:
-        await message.reply_text("⚠️ API Key Google AI Studio (`GEMINI_API_KEY`) belum dipasang di Environment Variables Back4App.")
+        await message.reply_text("⚠️ API Key Google AI Studio (`GEMINI_API_KEY`) belum dipasang di Back4App.")
         return
 
     if not message.photo:
         await message.reply_text("Silakan kirim foto produk bersama kata kunci /genvideo atau 'genVideo'.")
         return
 
-    status_msg = await message.reply_text("⏳ **[1/3]** Memproses foto & menganalisis produk...")
+    status_msg = await message.reply_text("⏳ **[1/2]** Menganalisis foto produk...")
 
     try:
-        # Download foto dari Telegram ke memori
+        # Download foto produk dari Telegram
         photo_file = await message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
 
         await context.bot.edit_message_text(
             chat_id=message.chat_id,
             message_id=status_msg.message_id,
-            text="💡 **[2/3]** Menggenerasi Hook Copywriting & Prompt Video 3-5 detik via Gemini..."
+            text="💡 **[2/2]** Merancang Hook Copywriting & Prompt Video (3-5 detik)..."
         )
 
         analysis_prompt = """
@@ -91,7 +133,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         [Isi prompt bahasa Inggris]
         """
 
-        # Panggil Gemini via SDK google-genai
+        # Kirim Gambar + Prompt ke Gemini API
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
@@ -113,35 +155,45 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         )
 
     except Exception as e:
+        logger.error(f"Error pada workflow genvideo: {e}")
         await context.bot.edit_message_text(
             chat_id=message.chat_id,
             message_id=status_msg.message_id,
-            text=f"❌ Terjadi kesalahan saat memproses: {str(e)}"
+            text=f"❌ Terjadi kesalahan saat memproses gambar: {str(e)}"
         )
 
 # ---------------------------------------------------------
-# 4. MAIN EXECUTION
+# 4. UTAMA
 # ---------------------------------------------------------
 def main():
-    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-    if not TELEGRAM_TOKEN:
-        print("ERROR: TELEGRAM_TOKEN environment variable is missing!")
+    if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
+        logger.error("TELEGRAM_BOT_TOKEN dan GEMINI_API_KEY harus diatur di Environment Variables!")
         return
 
-    threading.Thread(target=run_health_check_server, daemon=True).start()
+    # 1. Jalankan Dummy Web Server di thread latar belakang untuk Back4App Health Check
+    threading.Thread(target=run_dummy_server, daemon=True).start()
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    # 2. Inisialisasi Bot Telegram
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
+    # 3. Registrasi Handlers
     app.add_handler(CommandHandler("start", start_command))
+    
+    # Handler Command /genvideo
     app.add_handler(CommandHandler("genvideo", generate_video_workflow))
+    
+    # Handler foto dengan caption mengandung 'genvideo' (case-insensitive)
     app.add_handler(
         MessageHandler(
             filters.PHOTO & filters.Regex(r'(?i)genvideo'),
             generate_video_workflow
         )
     )
+    
+    # Handler pesan teks biasa (tanya-jawab biasa)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Bot Van Hermes berhasil berjalan...")
+    logger.info("Bot Van Hermes berhasil berjalan...")
     app.run_polling()
 
 if __name__ == "__main__":
