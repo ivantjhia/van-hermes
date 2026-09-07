@@ -1,7 +1,6 @@
 import os
 import logging
 import threading
-import base64
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
@@ -49,6 +48,18 @@ def is_authorized(user_id: int) -> bool:
         return True
     return str(user_id) in [u.strip() for u in ALLOWED_USERS]
 
+def upload_to_telegraph(photo_bytes: bytes) -> str:
+    """Mengunggah foto ke Telegraph (Telegram Official Public CDN)"""
+    url = "https://telegra.ph/upload"
+    files = {'file': ('photo.jpg', photo_bytes, 'image/jpeg')}
+    res = requests.post(url, files=files, timeout=30)
+    json_data = res.json()
+    
+    if isinstance(json_data, list) and len(json_data) > 0 and 'src' in json_data[0]:
+        return "https://telegra.ph" + json_data[0]['src']
+    else:
+        raise Exception(f"Gagal upload ke Telegraph: {res.text}")
+
 # ---------------------------------------------------------
 # 3. HANDLERS TELEGRAM
 # ---------------------------------------------------------
@@ -95,7 +106,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Terjadi kesalahan saat memproses permintaan Anda: {str(e)}")
 
 async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Workflow analisis foto via Qwen-VL Base64 -> Render Wan2.6 -> Kirim .mp4"""
+    """Workflow analisis foto via Qwen-VL -> Upload Telegraph CDN -> Render Wan2.6 -> Kirim .mp4"""
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         await update.message.reply_text("Akses ditolak.")
@@ -111,14 +122,13 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text("Silakan kirim foto produk bersama kata kunci /genvideo.")
         return
 
-    status_msg = await message.reply_text("⏳ **[1/3]** Mengunduh & Mengonversi foto produk...")
+    status_msg = await message.reply_text("⏳ **[1/3]** Mengunduh & Mengunggah foto ke Telegraph Public CDN...")
 
     try:
-        # 1. Download foto dari Telegram & Konversi langsung ke Base64 Data URI
+        # 1. Download foto dari Telegram & Upload ke Telegraph (Dapat URL Publik Resmi Telegram)
         photo_file = await message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
-        base64_str = base64.b64encode(photo_bytes).decode('utf-8')
-        data_uri = f"data:image/jpeg;base64,{base64_str}"
+        public_image_url = upload_to_telegraph(photo_bytes)
 
         await context.bot.edit_message_text(
             chat_id=message.chat_id,
@@ -147,7 +157,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         [Isi prompt bahasa Inggris]
         """
 
-        # 2. Analisis via Qwen-VL menggunakan Base64 Data URI
+        # 2. Analisis via Qwen-VL menggunakan Public Telegraph URL
         response = client.chat.completions.create(
             model="qwen-vl-max",
             messages=[
@@ -158,7 +168,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": data_uri
+                                "url": public_image_url
                             }
                         }
                     ]
@@ -178,7 +188,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
             text="🎬 **[3/3]** Me-render video `.mp4` via Wan2.6-I2V-flash..."
         )
 
-        # 3. Trigger Render Video Synchronous dengan Base64 Data URI
+        # 3. Trigger Render Video Synchronous menggunakan URL Telegraph
         task_url = "https://ws-3pp3842ksq2nry2w.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/image2video/video-synthesis"
         headers = {
             "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
@@ -188,7 +198,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         payload = {
             "model": "wan2.6-i2v-flash",
             "input": {
-                "image_url": data_uri,
+                "image_url": public_image_url,
                 "prompt": video_prompt
             }
         }
@@ -247,7 +257,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot Van Hermes (Direct Base64 Data URI) berhasil berjalan...")
+    logger.info("Bot Van Hermes (Telegraph Fix) berhasil berjalan...")
     app.run_polling()
 
 if __name__ == "__main__":
