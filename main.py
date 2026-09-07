@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import base64
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
@@ -48,22 +49,6 @@ def is_authorized(user_id: int) -> bool:
         return True
     return str(user_id) in [u.strip() for u in ALLOWED_USERS]
 
-def upload_image_to_public_host(photo_bytes: bytes) -> str:
-    """Mengunggah foto ke tmpfiles.org untuk mendapatkan Direct Public HTTPS URL"""
-    url = "https://tmpfiles.org/api/v1/upload"
-    files = {
-        'file': ('image.jpg', photo_bytes, 'image/jpeg')
-    }
-    res = requests.post(url, files=files, timeout=30)
-    json_data = res.json()
-    
-    if res.status_code == 200 and json_data.get("status") == "success":
-        page_url = json_data["data"]["url"]
-        direct_url = page_url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
-        return direct_url
-    else:
-        raise Exception(f"Gagal mengunggah foto ke Public Host: {res.text}")
-
 # ---------------------------------------------------------
 # 3. HANDLERS TELEGRAM
 # ---------------------------------------------------------
@@ -74,7 +59,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     welcome_text = (
-        "Halo! Saya **Van Hermes AI Agent** (Powered by Wan2.6-I2V-flash).\n\n"
+        "Halo! Saya **Van Hermes AI Agent** (Powered by Qwen Alibaba Cloud).\n\n"
         "Fitur yang tersedia:\n"
         "1. **Chat Biasa:** Kirim pesan teks langsung untuk bertanya ke Qwen LLM (`qwen-flash`).\n"
         "2. **Affiliate Video Workflow:** Kirim foto produk lalu sertakan caption `/genvideo` atau `genVideo`."
@@ -110,7 +95,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Terjadi kesalahan saat memproses permintaan Anda: {str(e)}")
 
 async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Workflow analisis foto via Qwen-VL -> Upload Public Host -> Render Wan2.6 -> Kirim .mp4"""
+    """Workflow analisis foto via Qwen-VL Base64 -> Render Wan2.6 -> Kirim .mp4"""
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         await update.message.reply_text("Akses ditolak.")
@@ -126,13 +111,14 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text("Silakan kirim foto produk bersama kata kunci /genvideo.")
         return
 
-    status_msg = await message.reply_text("⏳ **[1/3]** Mengunduh & Mengunggah foto ke Host Publik...")
+    status_msg = await message.reply_text("⏳ **[1/3]** Mengunduh & Mengonversi foto produk...")
 
     try:
-        # 1. Download foto dari Telegram & Upload ke tmpfiles
+        # 1. Download foto dari Telegram & Konversi langsung ke Base64 Data URI
         photo_file = await message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
-        public_image_url = upload_image_to_public_host(photo_bytes)
+        base64_str = base64.b64encode(photo_bytes).decode('utf-8')
+        data_uri = f"data:image/jpeg;base64,{base64_str}"
 
         await context.bot.edit_message_text(
             chat_id=message.chat_id,
@@ -161,7 +147,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         [Isi prompt bahasa Inggris]
         """
 
-        # 2. Analisis via Qwen-VL
+        # 2. Analisis via Qwen-VL menggunakan Base64 Data URI
         response = client.chat.completions.create(
             model="qwen-vl-max",
             messages=[
@@ -172,7 +158,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": public_image_url
+                                "url": data_uri
                             }
                         }
                     ]
@@ -192,7 +178,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
             text="🎬 **[3/3]** Me-render video `.mp4` via Wan2.6-I2V-flash..."
         )
 
-        # 3. Trigger Render Video Synchronous dengan Direct File URL
+        # 3. Trigger Render Video Synchronous dengan Base64 Data URI
         task_url = "https://ws-3pp3842ksq2nry2w.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/image2video/video-synthesis"
         headers = {
             "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
@@ -202,7 +188,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         payload = {
             "model": "wan2.6-i2v-flash",
             "input": {
-                "image_url": public_image_url,
+                "image_url": data_uri,
                 "prompt": video_prompt
             }
         }
@@ -261,7 +247,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot Van Hermes (TmpFiles Fix) berhasil berjalan...")
+    logger.info("Bot Van Hermes (Direct Base64 Data URI) berhasil berjalan...")
     app.run_polling()
 
 if __name__ == "__main__":
