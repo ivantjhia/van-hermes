@@ -48,20 +48,21 @@ def is_authorized(user_id: int) -> bool:
         return True
     return str(user_id) in [u.strip() for u in ALLOWED_USERS]
 
-def upload_image_to_catbox(photo_bytes: bytes) -> str:
-    """Mengunggah foto ke Catbox.moe (Tanpa perlu API Key) untuk dapat Public HTTPS URL"""
-    url = "https://catbox.moe/user/api.php"
+def upload_image_to_litterbox(photo_bytes: bytes) -> str:
+    """Mengunggah foto ke Litterbox (Catbox Temporary) untuk mendapatkan Direct Public HTTPS URL"""
+    url = "https://litterbox.catbox.moe/resources/internals/api.php"
     files = {
         'fileToUpload': ('image.jpg', photo_bytes, 'image/jpeg')
     }
     data = {
-        'reqtype': 'fileupload'
+        'reqtype': 'fileupload',
+        'time': '1h'
     }
     res = requests.post(url, data=data, files=files, timeout=30)
-    if res.status_code == 200 and res.text.startswith("https://"):
+    if res.status_code == 200 and res.text.strip().startswith("https://"):
         return res.text.strip()
     else:
-        raise Exception(f"Gagal mengunggah foto ke Catbox: {res.text}")
+        raise Exception(f"Gagal mengunggah foto ke Public Host: {res.text}")
 
 # ---------------------------------------------------------
 # 3. HANDLERS TELEGRAM
@@ -109,7 +110,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Terjadi kesalahan saat memproses permintaan Anda: {str(e)}")
 
 async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Workflow analisis foto via Qwen-VL -> Upload Catbox -> Render Wan2.6 -> Kirim .mp4"""
+    """Workflow analisis foto via Qwen-VL -> Upload Public Host -> Render Wan2.6 -> Kirim .mp4"""
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         await update.message.reply_text("Akses ditolak.")
@@ -128,10 +129,10 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
     status_msg = await message.reply_text("⏳ **[1/3]** Mengunduh & Mengunggah foto ke Public Host...")
 
     try:
-        # 1. Download foto dari Telegram & Upload ke Catbox (Public URL)
+        # 1. Download foto dari Telegram & Upload ke Litterbox
         photo_file = await message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
-        public_image_url = upload_image_to_catbox(photo_bytes)
+        public_image_url = upload_image_to_litterbox(photo_bytes)
 
         await context.bot.edit_message_text(
             chat_id=message.chat_id,
@@ -191,7 +192,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
             text="🎬 **[3/3]** Me-render video `.mp4` via Wan2.6-I2V-flash..."
         )
 
-        # 3. Trigger Render Video Synchronous dengan Public Image URL dari Catbox
+        # 3. Trigger Render Video Synchronous dengan Public Image URL
         task_url = "https://ws-3pp3842ksq2nry2w.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/image2video/video-synthesis"
         headers = {
             "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
@@ -260,7 +261,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot Van Hermes (Wan2.6 Catbox Host Fix) berhasil berjalan...")
+    logger.info("Bot Van Hermes (Litterbox Fix) berhasil berjalan...")
     app.run_polling()
 
 if __name__ == "__main__":
