@@ -2,7 +2,7 @@ import os
 import logging
 import threading
 import base64
-import requests
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -32,20 +32,22 @@ def run_dummy_server():
     server.serve_forever()
 
 # ---------------------------------------------------------
-# 2. SETUP CLIENTS
+# 2. SETUP CLIENTS & DASHSCOPE REGIONAL BASE URL
 # ---------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 ALLOWED_USERS = os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",")
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 
+# Set Base URL Regional MaaS untuk DashScope SDK secara Global
+REGIONAL_BASE_URL = "https://ws-3pp3842ksq2nry2w.ap-southeast-1.maas.aliyuncs.com"
+
 if DASHSCOPE_API_KEY:
     dashscope.api_key = DASHSCOPE_API_KEY
-
-QWEN_BASE_URL = "https://ws-3pp3842ksq2nry2w.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+    dashscope.base_http_api_url = f"{REGIONAL_BASE_URL}/api/v1"
 
 client = OpenAI(
     api_key=DASHSCOPE_API_KEY,
-    base_url=QWEN_BASE_URL
+    base_url=f"{REGIONAL_BASE_URL}/compatible-mode/v1"
 ) if DASHSCOPE_API_KEY else None
 
 def is_authorized(user_id: int) -> bool:
@@ -114,13 +116,20 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text("Silakan kirim foto produk bersama kata kunci /genvideo.")
         return
 
-    status_msg = await message.reply_text("⏳ **[1/3]** Mengunduh & Memproses foto produk...")
+    status_msg = await message.reply_text("⏳ **[1/3]** Mengunduh & Mengunggah foto ke DashScope Storage...")
 
     try:
         # 1. Simpan foto sementara di direktori lokal /tmp kontainer
         photo_file = await message.photo[-1].get_file()
         temp_img_path = "/tmp/product_input.jpg"
         await photo_file.download_to_drive(temp_img_path)
+
+        # Upload File secara Resmi menggunakan DashScope Files SDK
+        file_obj = dashscope.Files.upload(file_path=temp_img_path, purpose="inference")
+        if not hasattr(file_obj, 'id') or not file_obj.id:
+            raise Exception(f"Gagal upload file ke DashScope API: {file_obj}")
+        
+        file_uri = f"fileid://{file_obj.id}"
 
         # Konversi ke base64 untuk analisis Qwen-VL
         with open(temp_img_path, "rb") as f:
@@ -186,11 +195,10 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
             text="🎬 **[3/3]** Me-render video `.mp4` via Wan2.6..."
         )
 
-        # 3. Panggil DashScope SDK bawaan untuk upload file lokal dan panggil Wan2.6
-        # SDK Dashscope akan mengurus otentikasi OSS Alibaba secara otomatis
+        # 3. Panggil Wan2.6 menggunakan fileid:// resmi dari DashScope Files
         task_res = dashscope.Image2Video.async_call(
             model="wan2.6-i2v-flash",
-            image_url=f"file://{temp_img_path}",
+            image_url=file_uri,
             prompt=video_prompt
         )
 
@@ -199,7 +207,6 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
 
         # Polling status tugas sampai selesai
         video_url = None
-        import time
         for _ in range(36):
             time.sleep(10)
             status = dashscope.Image2Video.wait(task_res)
@@ -222,7 +229,7 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         else:
             raise Exception("Waktu render habis (Timeout).")
 
-        # Hapus file temporary
+        # Hapus file temporary & file DashScope
         if os.path.exists(temp_img_path):
             os.remove(temp_img_path)
 
@@ -256,7 +263,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot Van Hermes (Dashscope SDK File) berhasil berjalan...")
+    logger.info("Bot Van Hermes (Dashscope Files SDK Fix) berhasil berjalan...")
     app.run_polling()
 
 if __name__ == "__main__":
