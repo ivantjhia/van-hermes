@@ -2,12 +2,11 @@ import os
 import logging
 import threading
 import base64
-import time
+import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from openai import OpenAI
-import dashscope
 
 # Setup Logging
 logging.basicConfig(
@@ -32,18 +31,13 @@ def run_dummy_server():
     server.serve_forever()
 
 # ---------------------------------------------------------
-# 2. SETUP CLIENTS & DASHSCOPE REGIONAL BASE URL
+# 2. SETUP OPENAI-COMPATIBLE CLIENT (ALIBABA MAAS)
 # ---------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 ALLOWED_USERS = os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",")
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 
-# Set Base URL Regional MaaS untuk DashScope SDK secara Global
 REGIONAL_BASE_URL = "https://ws-3pp3842ksq2nry2w.ap-southeast-1.maas.aliyuncs.com"
-
-if DASHSCOPE_API_KEY:
-    dashscope.api_key = DASHSCOPE_API_KEY
-    dashscope.base_http_api_url = f"{REGIONAL_BASE_URL}/api/v1"
 
 client = OpenAI(
     api_key=DASHSCOPE_API_KEY,
@@ -116,26 +110,14 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text("Silakan kirim foto produk bersama kata kunci /genvideo.")
         return
 
-    status_msg = await message.reply_text("⏳ **[1/3]** Mengunduh & Mengunggah foto ke DashScope Storage...")
+    status_msg = await message.reply_text("⏳ **[1/3]** Memproses foto produk...")
 
     try:
-        # 1. Simpan foto sementara di direktori lokal /tmp kontainer
+        # 1. Download foto dari Telegram & Konversi langsung ke Base64 Data URI
         photo_file = await message.photo[-1].get_file()
-        temp_img_path = "/tmp/product_input.jpg"
-        await photo_file.download_to_drive(temp_img_path)
-
-        # Upload File secara Resmi menggunakan DashScope Files SDK
-        file_obj = dashscope.Files.upload(file_path=temp_img_path, purpose="inference")
-        if not hasattr(file_obj, 'id') or not file_obj.id:
-            raise Exception(f"Gagal upload file ke DashScope API: {file_obj}")
-        
-        file_uri = f"fileid://{file_obj.id}"
-
-        # Konversi ke base64 untuk analisis Qwen-VL
-        with open(temp_img_path, "rb") as f:
-            photo_bytes = f.read()
-            base64_str = base64.b64encode(photo_bytes).decode('utf-8')
-            data_uri = f"data:image/jpeg;base64,{base64_str}"
+        photo_bytes = await photo_file.download_as_bytearray()
+        base64_str = base64.b64encode(photo_bytes).decode('utf-8')
+        data_uri = f"data:image/jpeg;base64,{base64_str}"
 
         await context.bot.edit_message_text(
             chat_id=message.chat_id,
@@ -195,26 +177,27 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
             text="🎬 **[3/3]** Me-render video `.mp4` via Wan2.6..."
         )
 
-        # 3. Panggil Wan2.6 menggunakan fileid:// resmi dari DashScope Files
-        task_res = dashscope.Image2Video.async_call(
-            model="wan2.6-i2v-flash",
-            image_url=file_uri,
-            prompt=video_prompt
-        )
+        # 3. Panggil API Video Generation Synchronous langsung ke Regional Base URL
+        video_api_url = f"{REGIONAL_BASE_URL}/api/v1/services/aigc/image2video/video-synthesis"
+        headers = {
+            "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": "wan2.6-i2v-flash",
+            "input": {
+                "image_url": data_uri,
+                "prompt": video_prompt
+            }
+        }
 
-        if task_res.status_code != 200:
-            raise Exception(f"Gagal memicu render Wan2.6: {task_res.message}")
+        task_res = requests.post(video_api_url, headers=headers, json=payload, timeout=180)
+        task_json = task_res.json()
 
-        # Polling status tugas sampai selesai
         video_url = None
-        for _ in range(36):
-            time.sleep(10)
-            status = dashscope.Image2Video.wait(task_res)
-            if status.output.task_status == 'SUCCEEDED':
-                video_url = status.output.video_url
-                break
-            elif status.output.task_status in ['FAILED', 'CANCELED']:
-                raise Exception(f"Render gagal di Wan2.6: {status.output.message}")
+        if task_res.status_code == 200 and "output" in task_json:
+            video_url = task_json["output"].get("video_url")
 
         # 4. Kirim file video ke Telegram
         if video_url:
@@ -227,11 +210,8 @@ async def generate_video_workflow(update: Update, context: ContextTypes.DEFAULT_
             )
             await context.bot.delete_message(chat_id=message.chat_id, message_id=status_msg.message_id)
         else:
-            raise Exception("Waktu render habis (Timeout).")
-
-        # Hapus file temporary & file DashScope
-        if os.path.exists(temp_img_path):
-            os.remove(temp_img_path)
+            error_msg = task_json.get("message", task_res.text)
+            raise Exception(f"Gagal me-render video Wan2.6: {error_msg}")
 
     except Exception as e:
         logger.error(f"Error pada workflow genvideo: {e}")
@@ -263,7 +243,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot Van Hermes (Dashscope Files SDK Fix) berhasil berjalan...")
+    logger.info("Bot Van Hermes (Direct Base64 Call) berhasil berjalan...")
     app.run_polling()
 
 if __name__ == "__main__":
